@@ -70,6 +70,15 @@ def place_order(side, quantity, price):
         price=price
     )
 
+def get_last_buy_price_if_balance_high(symbol="XRPUSDT", asset="XRP", min_qty=10):
+    balance = get_balance(asset)
+    if balance >= min_qty:
+        trades = client.get_my_trades(symbol=symbol)
+        for trade in reversed(trades):  # Most recent first
+            if trade['isBuyer']:
+                return float(trade['price'])
+    return None
+
 # === TRADING LOOP ===
 buy_price = None
 cooldown_start = None
@@ -93,11 +102,20 @@ async def trading_loop():
             current_price = get_price()
             print(f"{now} | Price: {current_price:.4f}")
 
+            # Check XRP balance and reset buy_price if needed
+            xrp_balance = get_balance("XRP")
+            if xrp_balance >= 10:
+                last_buy_price = get_last_buy_price_if_balance_high()
+                if last_buy_price:
+                    print(f"{now} | 📌 Last buy price (XRP > 10): {last_buy_price:.4f}")
+            else:
+                buy_price = 0
+                print(f"{now} | XRP balance is below 10. Resetting buy_price to 0.")
+
             if buy_price:
                 price_change = (current_price - buy_price) / buy_price
 
                 if price_change >= PROFIT_TARGET or price_change <= -STOP_LOSS_PERCENTAGE:
-                    xrp_balance = get_balance("XRP")
                     if xrp_balance > 0:
                         qty = round_step_size(xrp_balance, lot_size)
                         price = round_step_size(current_price, tick_size)
@@ -111,7 +129,7 @@ async def trading_loop():
 
             else:
                 usdt_balance = get_balance("USDT")
-                ticker_24hr = client.get_ticker_24hr(symbol=SYMBOL)
+                ticker_24hr = client.get_ticker(symbol=SYMBOL)
                 price_change_percent = float(ticker_24hr['priceChangePercent'])
 
                 print(f"{now} | 24hr Change: {price_change_percent:.2f}%")
