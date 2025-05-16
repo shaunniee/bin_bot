@@ -117,7 +117,7 @@ async def trading_loop():
                 usdt_balance = get_balance("USDT")
                 xrp_balance= get_balance("XRP")
                 print(usdt_balance)
-                print(xrp_balance)
+                print(xrp_balance*current_price)
                 if usdt_balance >= 10:
                     trade_usdt = usdt_balance * TRADE_PERCENTAGE
                     qty = round_step_size(trade_usdt / current_price, lot_size)
