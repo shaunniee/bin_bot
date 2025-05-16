@@ -47,10 +47,7 @@ tick_size = get_tick_size()
 
 # === UTILS ===
 async def send_telegram(msg):
-    try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
 
 def get_price():
     ticker = client.get_symbol_ticker(symbol=SYMBOL)
