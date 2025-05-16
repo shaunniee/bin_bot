@@ -12,8 +12,6 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-
-
 SYMBOL = "XRPUSDT"
 TRADE_PERCENTAGE = 0.98
 PROFIT_TARGET = 0.03
@@ -28,8 +26,6 @@ in_cooldown = False
 
 # === PRECISION HANDLING ===
 symbol_info = client.get_symbol_info(SYMBOL)
-quantity_precision = int(symbol_info['baseAssetPrecision'])
-price_precision = int(symbol_info['quoteAssetPrecision'])
 
 def round_step_size(value, step_size):
     return round(value - (value % step_size), 8)
@@ -115,18 +111,23 @@ async def trading_loop():
 
             else:
                 usdt_balance = get_balance("USDT")
-                xrp_balance= get_balance("XRP")
-                print(usdt_balance)
-                print(xrp_balance*current_price)
-                if usdt_balance >= 10:
-                    trade_usdt = usdt_balance * TRADE_PERCENTAGE
-                    qty = round_step_size(trade_usdt / current_price, lot_size)
-                    price = round_step_size(current_price, tick_size)
-                    print(place_order("Buy", qty, str(price)))
-                    buy_price = current_price
-                    await send_telegram(f"🛒 Bought XRP at {price:.4f}")
+                ticker_24hr = client.get_ticker_24hr(symbol=SYMBOL)
+                price_change_percent = float(ticker_24hr['priceChangePercent'])
+
+                print(f"{now} | 24hr Change: {price_change_percent:.2f}%")
+
+                if price_change_percent <= -5:
+                    if usdt_balance >= 10:
+                        trade_usdt = usdt_balance * TRADE_PERCENTAGE
+                        qty = round_step_size(trade_usdt / current_price, lot_size)
+                        price = round_step_size(current_price, tick_size)
+                        place_order("Buy", qty, str(price))
+                        buy_price = current_price
+                        await send_telegram(f"🛒 Bought XRP at {price:.4f} after 24hr drop of {price_change_percent:.2f}%")
+                    else:
+                        print(f"{now} | Skipping buy: USDT too low (${usdt_balance:.2f})")
                 else:
-                    print(f"{now} | Skipping buy: USDT too low (${usdt_balance:.2f})")
+                    print(f"{now} | Skipping buy: 24hr price drop is only {price_change_percent:.2f}%")
 
         except Exception as e:
             print(f"Error: {e}")
