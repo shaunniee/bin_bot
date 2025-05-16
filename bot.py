@@ -105,9 +105,9 @@ async def trading_loop():
             # Check XRP balance and reset buy_price if needed
             xrp_balance = get_balance("XRP")
             if xrp_balance >= 10:
-                last_buy_price = get_last_buy_price_if_balance_high()
-                if last_buy_price:
-                    print(f"{now} | 📌 Last buy price (XRP > 10): {last_buy_price:.4f}")
+                buy_price = get_last_buy_price_if_balance_high()
+                if buy_price:
+                    print(f"{now} | 📌 Last buy price (XRP > 10): {buy_price:.4f}")
             else:
                 buy_price = 0
                 print(f"{now} | XRP balance is below 10. Resetting buy_price to 0.")
