@@ -117,7 +117,7 @@ async def trading_loop():
                     trade_usdt = usdt_balance * TRADE_PERCENTAGE
                     qty = round_step_size(trade_usdt / current_price, lot_size)
                     price = round_step_size(current_price, tick_size)
-                    place_order("Buy", qty, str(price))
+                    print(place_order("Buy", qty, str(price)))
                     buy_price = current_price
                     await send_telegram(f"🛒 Bought XRP at {price:.4f}")
                 else:
