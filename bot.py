@@ -13,7 +13,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 SYMBOL = "XRPUSDT"
-TRADE_PERCENTAGE = 0.98
+TRADE_PERCENTAGE = 1
 PROFIT_TARGET = 0.03
 STOP_LOSS_PERCENTAGE = 0.03
 COOLDOWN_SECONDS = 86400  # 24 hours
@@ -50,13 +50,39 @@ def get_balance(asset):
     balance = client.get_asset_balance(asset=asset)
     return float(balance['free'])
 
+def wait_for_filled_order(order_id):
+    while True:
+        order = client.get_order(symbol=SYMBOL, orderId=order_id)
+        if order['status'] == 'FILLED':
+            return order
+        time.sleep(2)
+
 def place_order(side, quantity):
-    return client.create_order(
+    order = client.create_order(
         symbol=SYMBOL,
         side=SIDE_BUY if side == "Buy" else SIDE_SELL,
         type=ORDER_TYPE_MARKET,
         quantity=quantity
     )
+    filled_order = wait_for_filled_order(order['orderId'])
+
+    # Get trade details
+    trades = client.get_my_trades(symbol=SYMBOL)
+    recent_trades = [t for t in trades if t['orderId'] == order['orderId']]
+    executed_qty = sum(float(t['qty']) for t in recent_trades)
+    total_cost = sum(float(t['qty']) * float(t['price']) for t in recent_trades)
+    fee = sum(float(t['commission']) for t in recent_trades)
+    commission_asset = recent_trades[0]['commissionAsset'] if recent_trades else 'N/A'
+    avg_price = total_cost / executed_qty if executed_qty else 0
+
+    return {
+        "executed_qty": executed_qty,
+        "avg_price": avg_price,
+        "total_cost": total_cost,
+        "fee": fee,
+        "commission_asset": commission_asset,
+        "order": filled_order
+    }
 
 def get_last_buy_price_if_balance_high(symbol="XRPUSDT", asset="XRP", min_qty=10):
     balance = get_balance(asset)
@@ -125,9 +151,14 @@ async def trading_loop():
                 if price_change >= PROFIT_TARGET or price_change <= -STOP_LOSS_PERCENTAGE:
                     if xrp_balance > 0:
                         qty = round_step_size(xrp_balance, lot_size)
-                        place_order("Sell", qty)
+                        order_info = place_order("Sell", qty)
                         status = "📈 Sold XRP (Profit)" if price_change >= PROFIT_TARGET else "🔻 Stop-loss hit. Sold XRP"
-                        await send_telegram(f"{status} at {current_price:.4f}")
+                        await send_telegram(
+                            f"{status}\n"
+                            f"🔹 Quantity: {order_info['executed_qty']:.2f}\n"
+                            f"💰 Avg Price: {order_info['avg_price']:.4f} USDT\n"
+                            f"💸 Fee: {order_info['fee']} {order_info['commission_asset']}"
+                        )
                         buy_price = None
                         if price_change <= -STOP_LOSS_PERCENTAGE:
                             cooldown_start = time.time()
@@ -135,13 +166,18 @@ async def trading_loop():
 
             # === BUY LOGIC ===
             else:
-                if price_change_percent <= -3:
+                if price_change_percent <= -5:
                     if usdt_balance >= 10:
                         trade_usdt = usdt_balance * TRADE_PERCENTAGE
                         qty = round_step_size(trade_usdt / current_price, lot_size)
-                        place_order("Buy", qty)
-                        buy_price = current_price
-                        await send_telegram(f"🛒 Bought XRP at {current_price:.4f} after 24hr drop of {price_change_percent:.2f}%")
+                        order_info = place_order("Buy", qty)
+                        buy_price = order_info['avg_price']
+                        await send_telegram(
+                            f"🛒 Bought XRP\n"
+                            f"🔹 Quantity: {order_info['executed_qty']:.2f}\n"
+                            f"💰 Avg Price: {order_info['avg_price']:.4f} USDT\n"
+                            f"💸 Fee: {order_info['fee']} {order_info['commission_asset']}"
+                        )
                     else:
                         print(f"{now} | Skipping buy: USDT too low (${usdt_balance:.2f})")
                 else:
