@@ -1,5 +1,4 @@
 import os
-import time
 import asyncio
 from binance.client import Client
 from binance.enums import *
@@ -20,7 +19,7 @@ COOLDOWN_SECONDS = 86400  # 24 hours
 
 # === INIT ===
 client = Client(API_KEY, API_SECRET)
-client.API_URL = 'https://testnet.binance.vision/api'  # Use Binance Spot Testnet
+client.API_URL = 'https://testnet.binance.vision/api'
 bot = Bot(token=TELEGRAM_TOKEN)
 in_cooldown = False
 
@@ -50,23 +49,22 @@ def get_balance(asset):
     balance = client.get_asset_balance(asset=asset)
     return float(balance['free'])
 
-def wait_for_filled_order(order_id):
+async def wait_for_filled_order(order_id):
     while True:
         order = client.get_order(symbol=SYMBOL, orderId=order_id)
         if order['status'] == 'FILLED':
             return order
-        time.sleep(2)
+        await asyncio.sleep(2)
 
-def place_order(side, quantity):
+async def place_order(side, quantity):
     order = client.create_order(
         symbol=SYMBOL,
         side=SIDE_BUY if side == "Buy" else SIDE_SELL,
         type=ORDER_TYPE_MARKET,
         quantity=quantity
     )
-    filled_order = wait_for_filled_order(order['orderId'])
+    filled_order = await wait_for_filled_order(order['orderId'])
 
-    # Get trade details
     trades = client.get_my_trades(symbol=SYMBOL)
     recent_trades = [t for t in trades if t['orderId'] == order['orderId']]
     executed_qty = sum(float(t['qty']) for t in recent_trades)
@@ -88,15 +86,13 @@ def get_last_buy_price_if_balance_high(symbol="XRPUSDT", asset="XRP", min_qty=10
     balance = get_balance(asset)
     if balance >= min_qty:
         trades = client.get_my_trades(symbol=symbol)
-        for trade in reversed(trades):  # Most recent first
+        for trade in reversed(trades):
             if trade['isBuyer']:
                 return float(trade['price'])
     return None
-
 # === TRADING LOOP ===
 buy_price = None
 cooldown_start = None
-
 async def trading_loop():
     global buy_price, cooldown_start, in_cooldown
 
@@ -129,7 +125,6 @@ async def trading_loop():
 
             change_from_buy = ((current_price - buy_price) / buy_price * 100) if buy_price else None
 
-            # === LOGGING AND TELEGRAM UPDATE ===
             log_msg = (
                 f"{now} | 📊 Market Check\n"
                 f"🔹 Current Price: {current_price:.4f} USDT\n"
@@ -151,7 +146,7 @@ async def trading_loop():
                 if price_change >= PROFIT_TARGET or price_change <= -STOP_LOSS_PERCENTAGE:
                     if xrp_balance > 0:
                         qty = round_step_size(xrp_balance, lot_size)
-                        order_info = place_order("Sell", qty)
+                        order_info = await place_order("Sell", qty)
                         status = "📈 Sold XRP (Profit)" if price_change >= PROFIT_TARGET else "🔻 Stop-loss hit. Sold XRP"
                         await send_telegram(
                             f"{status}\n"
@@ -166,11 +161,11 @@ async def trading_loop():
 
             # === BUY LOGIC ===
             else:
-                if price_change_percent <= -5:
+                if price_change_percent <= -3:
                     if usdt_balance >= 10:
                         trade_usdt = usdt_balance * TRADE_PERCENTAGE
                         qty = round_step_size(trade_usdt / current_price, lot_size)
-                        order_info = place_order("Buy", qty)
+                        order_info = await place_order("Buy", qty)
                         buy_price = order_info['avg_price']
                         await send_telegram(
                             f"🛒 Bought XRP\n"
@@ -187,7 +182,7 @@ async def trading_loop():
             print(f"Error: {e}")
             await send_telegram(f"⚠️ Error occurred: {e}")
 
-        await asyncio.sleep(600)  # Wait 10 minutes
+        await asyncio.sleep(600)
 
 # Run the trading loop
 asyncio.run(trading_loop())
