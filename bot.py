@@ -140,8 +140,7 @@ async def trading_loop():
                 f"💎 ETH Balance: {eth_balance:.2f} (~{eth_value:.2f} USDT)\n"
                 f"💼 Total Value: {total_value:.2f} USDT\n"
             )
-            client.create_order(symbol="BTCUSDT",side=SIDE_SELL,type=ORDER_TYPE_MARKET,quantity=0.08)
-            client.create_order(symbol="ETHUSDT",side=SIDE_SELL,type=ORDER_TYPE_MARKET,quantity=0.77)
+
             if buy_price:
                 log_msg += f"🛒 Buy Price: {buy_price:.4f} | Change Since Buy: {change_from_buy:.2f}%\n"
 
