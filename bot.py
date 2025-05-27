@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from binance.client import Client
 from binance.enums import *
 from telegram import Bot
@@ -13,8 +14,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 SYMBOL = "XRPUSDT"
 TRADE_PERCENTAGE = 0.99
-PROFIT_TARGET = 0.03
-STOP_LOSS_PERCENTAGE = 0.03
+PROFIT_TARGET = 0.025
+STOP_LOSS_PERCENTAGE = 0.025
 COOLDOWN_SECONDS = 86400  # 24 hours
 
 # === INIT ===
@@ -161,7 +162,7 @@ async def trading_loop():
 
             # === BUY LOGIC ===
             else:
-                if price_change_percent <= -3:
+                if price_change_percent <= -2.5:
                     if usdt_balance >= 10:
                         trade_usdt = usdt_balance * TRADE_PERCENTAGE
                         qty = round_step_size(trade_usdt / current_price, lot_size)
