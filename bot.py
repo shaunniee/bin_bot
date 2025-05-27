@@ -112,9 +112,13 @@ async def trading_loop():
 
             current_price = get_price()
             xrp_balance = get_balance("XRP")
+            btc_balance = get_balance("BTC")
+            eth_balance = get_balance("ETH")
             usdt_balance = get_balance("USDT")
             xrp_value = xrp_balance * current_price
-            total_value = usdt_balance + xrp_value
+            btc_value = btc_balance * current_price
+            eth_value = eth_balance * current_price
+            total_value = usdt_balance + xrp_value + btc_value + eth_value
 
             ticker_24hr = client.get_ticker(symbol=SYMBOL)
             price_change_percent = float(ticker_24hr['priceChangePercent'])
@@ -132,6 +136,8 @@ async def trading_loop():
                 f"📉 24hr Change: {price_change_percent:.2f}%\n"
                 f"💰 USDT Balance: {usdt_balance:.2f}\n"
                 f"💎 XRP Balance: {xrp_balance:.2f} (~{xrp_value:.2f} USDT)\n"
+                f"💎 BTC Balance: {btc_balance:.2f} (~{btc_value:.2f} USDT)\n"
+                f"💎 ETH Balance: {eth_balance:.2f} (~{eth_value:.2f} USDT)\n"
                 f"💼 Total Value: {total_value:.2f} USDT\n"
             )
             if buy_price:
