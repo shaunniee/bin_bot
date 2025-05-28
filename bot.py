@@ -112,7 +112,7 @@ def plot_equity_curve(equity_df, label):
 # Run Multiple Strategies
 # ------------------------
 if __name__ == "__main__":
-    df = fetch_ohlcv("BTC/USDT", timeframe="5m", limit=1000)
+    df = fetch_ohlcv("XRP/USDT", timeframe="5m", limit=1000)
 
     buy_strategies = {
         "conservative_buy": conservative_buy,
