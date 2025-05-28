@@ -1,173 +1,144 @@
-import os
 import ccxt
 import pandas as pd
-from dotenv import load_dotenv
-from pymongo import MongoClient
-from ta.trend import EMAIndicator, MACD, ADXIndicator
+import matplotlib.pyplot as plt
+from ta.trend import EMAIndicator, ADXIndicator, MACD
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
 
-# === Load environment ===
-load_dotenv()
-MONGO_URI = os.getenv("MONGO_URI")
-client = MongoClient(MONGO_URI)
-db = client["tradingbot"]
-backtest_collection = db["sweep_results"]
+# ------------------------
+# Fetch Historical Data
+# ------------------------
+def fetch_ohlcv(symbol="BTC/USDT", timeframe="5m", limit=1000):
+    exchange = ccxt.binance()
+    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    return df
 
-# === Set up exchange ===
-exchange = ccxt.binance()
-symbol = "BTC/USDT"
-timeframe = "5m"
-
-# === Indicators ===
+# ------------------------
+# Apply Technical Indicators
+# ------------------------
 def apply_indicators(df):
     df["EMA9"] = EMAIndicator(close=df["close"], window=9).ema_indicator()
     df["EMA21"] = EMAIndicator(close=df["close"], window=21).ema_indicator()
     df["RSI"] = RSIIndicator(close=df["close"], window=14).rsi()
     df["ATR"] = AverageTrueRange(high=df["high"], low=df["low"], close=df["close"], window=14).average_true_range()
     df["VWAP"] = (df["volume"] * (df["high"] + df["low"] + df["close"]) / 3).cumsum() / df["volume"].cumsum()
-    macd = MACD(close=df["close"])
-    df["MACD_diff"] = macd.macd_diff()
-    adx = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
-    df["ADX"] = adx.adx()
-    return df.dropna()
+    df["MACD_diff"] = MACD(close=df["close"]).macd_diff()
+    df["ADX"] = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14).adx()
+    return df
 
-# === Regime Detection ===
-def detect_market_regime(df):
-    return "trending" if df["ADX"].iloc[-1] > 25 else "ranging"
+# ------------------------
+# Strategy Variants
+# ------------------------
 
-# === Buy Strategies ===
-def basic_buy(df, rsi_bounds):
+# Buy Variants
+def conservative_buy(df):  # EMA cross + RSI tighter
     latest = df.iloc[-1]
-    regime = detect_market_regime(df)
-    rsi_lower, rsi_upper = rsi_bounds
     return (
-        regime == "trending" and
-        latest["EMA9"] > latest["EMA21"] and
-        rsi_lower < latest["RSI"] < rsi_upper and
-        latest["close"] > latest["VWAP"] and
-        latest["ADX"] > 20
+        latest["EMA9"] > latest["EMA21"]
+        and 45 < latest["RSI"] < 60
+        and latest["close"] > latest["VWAP"]
     )
 
-# === Sell Strategy ===
-def should_sell(df, entry_price, sl, rsi_bounds):
+def aggressive_buy(df):  # Only EMA cross
     latest = df.iloc[-1]
-    price = latest["close"]
-    atr = latest["ATR"]
-    regime = detect_market_regime(df)
-    rsi = latest["RSI"]
-    rsi_lower, rsi_upper = rsi_bounds
+    return latest["EMA9"] > latest["EMA21"]
 
-    if regime == "trending":
-        return (
-            latest["EMA9"] < latest["EMA21"] or
-            rsi > rsi_upper or
-            price < entry_price - sl * atr or
-            latest["MACD_diff"] < 0 or
-            latest["ADX"] < 20
-        )
-    else:
-        return (
-            rsi > rsi_upper or
-            price < entry_price - sl * atr or
-            price < latest["VWAP"]
-        )
+# Sell Variants
+def conservative_sell(df, entry_price):  # Exit on RSI or ATR stop
+    latest = df.iloc[-1]
+    return (
+        latest["RSI"] > 70 or
+        latest["close"] < entry_price - 1.5 * latest["ATR"]
+    )
 
-# === Fetch historical data ===
-def fetch_data(symbol, timeframe="5m", limit=1000):
-    raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return apply_indicators(df)
+def aggressive_sell(df, entry_price):  # Exit early
+    latest = df.iloc[-1]
+    return (
+        latest["EMA9"] < latest["EMA21"] or
+        latest["MACD_diff"] < 0
+    )
 
-# === Backtest logic ===
-def backtest(df, tp, sl, rsi_bounds, max_hold, buy_fn, buy_combo_name):
+# ------------------------
+# Backtest Engine
+# ------------------------
+def backtest_strategy(df, buy_func, sell_func):
+    df = apply_indicators(df.copy())
     trades = []
-    for i in range(len(df) - max_hold):
+    position = None
+    equity_curve = []
+    balance = 1000  # Start balance
+
+    for i in range(50, len(df)):
         window = df.iloc[:i+1]
-        if buy_fn(window, rsi_bounds):
-            buy_price = df.iloc[i]["close"]
-            buy_time = df.iloc[i]["timestamp"]
-            atr = df.iloc[i]["ATR"]
-            tp_price = buy_price + tp * atr
-            sl_price = buy_price - sl * atr
+        price = window.iloc[-1]["close"]
 
-            for j in range(i+1, i+max_hold):
-                price = df.iloc[j]["close"]
-                sub_window = df.iloc[:j+1]
+        if position is None:
+            if buy_func(window):
+                position = {"buy_price": price, "buy_time": window.iloc[-1]["timestamp"]}
+        else:
+            if sell_func(window, position["buy_price"]):
+                sell_price = price
+                pnl = sell_price - position["buy_price"]
+                balance += pnl
+                trades.append({
+                    "buy_time": position["buy_time"],
+                    "sell_time": window.iloc[-1]["timestamp"],
+                    "buy_price": position["buy_price"],
+                    "sell_price": sell_price,
+                    "pnl": pnl,
+                    "balance": balance
+                })
+                position = None
 
-                if price >= tp_price:
-                    reason = "TP"
-                elif price <= sl_price:
-                    reason = "SL"
-                elif should_sell(sub_window, buy_price, sl, rsi_bounds):
-                    reason = "Signal"
-                elif j == i + max_hold - 1:
-                    reason = "Timeout"
-                else:
-                    continue
+        equity_curve.append(balance if position is None else balance + (price - position["buy_price"]))
 
-                exit_price = df.iloc[j]["close"]
-                exit_time = df.iloc[j]["timestamp"]
-                pnl = exit_price - buy_price
-                duration = (exit_time - buy_time).total_seconds() / 60
+    result_df = pd.DataFrame(trades)
+    equity_df = pd.DataFrame({"timestamp": df.iloc[50:]["timestamp"].values, "equity": equity_curve})
+    return result_df, equity_df
 
-                trade = {
-                    "entry_time": buy_time.isoformat(),
-                    "entry_price": round(buy_price, 2),
-                    "exit_time": exit_time.isoformat(),
-                    "exit_price": round(exit_price, 2),
-                    "pnl": round(pnl, 2),
-                    "reason": reason,
-                    "duration_min": duration,
-                    "tp": tp,
-                    "sl": sl,
-                    "rsi_bounds": rsi_bounds,
-                    "max_hold": max_hold,
-                    "buy_combo": buy_combo_name
-                }
-                trades.append(trade)
-                break
+# ------------------------
+# Plot Results
+# ------------------------
+def plot_equity_curve(equity_df, label):
+    plt.plot(equity_df["timestamp"], equity_df["equity"], label=label)
+    plt.xlabel("Time")
+    plt.ylabel("Equity (USDT)")
+    plt.title("Equity Curve")
+    plt.legend()
 
-    wins = sum(1 for t in trades if t["pnl"] > 0)
-    avg_pnl = sum(t["pnl"] for t in trades) / len(trades) if trades else 0
-    win_rate = wins / len(trades) if trades else 0
-
-    return trades, win_rate, avg_pnl
-
-# === Sweep parameters ===
-def sweep():
-    df = fetch_data(symbol)
-    results = []
-    param_combos = [
-        (tp, sl, rsi_bounds, max_hold)
-        for tp in [2.0, 2.5, 3.0]
-        for sl in [1.0, 1.5, 2.0]
-        for rsi_bounds in [(40, 70), (45, 65)]
-        for max_hold in [30, 40]
-    ]
-
-    for tp, sl, rsi_bounds, max_hold in param_combos:
-        trades, win_rate, avg_pnl = backtest(df, tp, sl, rsi_bounds, max_hold, basic_buy, "basic_buy")
-        results.append({
-            "tp": tp,
-            "sl": sl,
-            "rsi_bounds": rsi_bounds,
-            "max_hold": max_hold,
-            "buy_combo": "basic_buy",
-            "win_rate": win_rate,
-            "avg_pnl": avg_pnl,
-            "num_trades": len(trades)
-        })
-
-    df_results = pd.DataFrame(results)
-    df_results["score"] = df_results["avg_pnl"] * 0.7 + df_results["win_rate"] * 100 * 0.3
-    top10 = df_results.sort_values(by="score", ascending=False).head(10)
-    print("\nTop 10 Best Strategies:\n")
-    print(top10.to_string(index=False))
-
-    # Optional: Save to MongoDB
-    backtest_collection.insert_many(top10.to_dict("records"))
-
+# ------------------------
+# Run Multiple Strategies
+# ------------------------
 if __name__ == "__main__":
-    sweep()
+    df = fetch_ohlcv("BTC/USDT", timeframe="5m", limit=1000)
+
+    buy_strategies = {
+        "conservative_buy": conservative_buy,
+        "aggressive_buy": aggressive_buy,
+    }
+
+    sell_strategies = {
+        "conservative_sell": conservative_sell,
+        "aggressive_sell": aggressive_sell,
+    }
+
+    all_results = []
+
+    for b_name, b_func in buy_strategies.items():
+        for s_name, s_func in sell_strategies.items():
+            trades, equity = backtest_strategy(df, b_func, s_func)
+            total_pnl = trades["pnl"].sum()
+            win_rate = (trades["pnl"] > 0).sum() / len(trades) * 100 if not trades.empty else 0
+
+            label = f"{b_name} / {s_name}"
+            all_results.append((label, total_pnl, win_rate))
+            print(f"\n📈 {label}")
+            print(f"Trades: {len(trades)} | Total PnL: {total_pnl:.2f} | Win Rate: {win_rate:.2f}%")
+
+            plot_equity_curve(equity, label)
+
+    plt.tight_layout()
+    plt.grid(True)
+    plt.show()
