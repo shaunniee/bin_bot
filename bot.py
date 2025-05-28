@@ -1,91 +1,92 @@
 import os
-import ccxt
+from binance.client import Client
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from ta.trend import EMAIndicator, ADXIndicator, MACD
-from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
-from dotenv import load_dotenv
+import ta
 
-# Load environment variables
-load_dotenv()
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
+# --- Load API keys from environment variables ---
+API_KEY = os.getenv('BINANCE_API_KEY', '')
+API_SECRET = os.getenv('BINANCE_API_SECRET', '')
 
-# Initialize Binance testnet
-exchange = ccxt.binance({
-    'apiKey': API_KEY,
-    'secret': API_SECRET,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'spot'}
-})
-exchange.set_sandbox_mode(True)
+client = Client(API_KEY, API_SECRET, testnet=True)  # Use testnet
 
-# Fetch historical OHLCV data
-def fetch_ohlcv(symbol='BTC/USDT', timeframe='5m', limit=1000):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    return df
+# --- Fetch historical klines from Binance ---
+def get_klines(symbol='BTCUSDT', interval='15m', limit=1000):
+    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    df = pd.DataFrame(klines, columns=[
+        'open_time', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_asset_volume', 'number_of_trades',
+        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+    ])
+    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+    df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
+    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
+    return df[['open_time', 'open', 'high', 'low', 'close', 'volume']]
 
-# Apply indicators
-def apply_indicators(df):
-    df['EMA9'] = EMAIndicator(df['close'], window=9).ema_indicator()
-    df['EMA21'] = EMAIndicator(df['close'], window=21).ema_indicator()
-    df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
-    df['ATR'] = AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
-    df['VWAP'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
-    df['MACD'] = MACD(df['close']).macd_diff()
-    df['ADX'] = ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
-    return df
-# Backtest logic
-def backtest(df, initial_balance=10000):
-    balance = initial_balance
-    position = 0
-    entry_price = 0
-    equity_curve = []
-    trades = []
+df = get_klines('BTCUSDT', '15m', 1000)
 
-    for i in range(1, len(df)):
-        row = df.iloc[i]
+# --- Calculate indicators ---
+df['SMA_10'] = df['close'].rolling(window=10).mean()
+df['SMA_30'] = df['close'].rolling(window=30).mean()
+df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+macd = ta.trend.MACD(df['close'])
+df['MACD'] = macd.macd()
+df['MACD_signal'] = macd.macd_signal()
 
-        # Buy condition
-        if position == 0 and row['EMA9'] > row['EMA21'] and 40 < row['RSI'] < 70 and row['close'] > row['VWAP'] and row['ADX'] > 20:
-            position = balance / row['close']
-            entry_price = row['close']
-            balance = 0
-            trades.append((row.name, 'BUY', entry_price))
+# --- Buy signals ---
+def buy_sma_cross(df, i):
+    return df['SMA_10'].iloc[i] > df['SMA_30'].iloc[i] and df['SMA_10'].iloc[i-1] <= df['SMA_30'].iloc[i-1]
 
-        # Sell condition
-        elif position > 0 and (row['EMA9'] < row['EMA21'] or row['RSI'] > 70 or row['MACD'] < 0 or row['ADX'] < 20):
-            balance = position * row['close']
-            pnl = (row['close'] - entry_price) * position
-            trades.append((row.name, 'SELL', row['close'], pnl))
-            position = 0
-            entry_price = 0
+def buy_rsi_oversold(df, i):
+    return df['RSI'].iloc[i] < 30
 
-        equity = balance + position * row['close']
-        equity_curve.append(equity)
+def buy_macd_cross(df, i):
+    return df['MACD'].iloc[i] > df['MACD_signal'].iloc[i] and df['MACD'].iloc[i-1] <= df['MACD_signal'].iloc[i-1]
 
-    return equity_curve, trades
+# --- Sell signals ---
+def sell_profit_target(df, i, entry_price, target=0.02):
+    return (df['close'].iloc[i] - entry_price) / entry_price >= target
 
-# Run backtest
-df = fetch_ohlcv()
-df = apply_indicators(df)
-equity_curve, trades = backtest(df)
+def sell_rsi_overbought(df, i, entry_price=None):
+    return df['RSI'].iloc[i] > 70
 
-# Plot results
-plt.figure(figsize=(12, 6))
-plt.plot(df.index[-len(equity_curve):], equity_curve, label='Equity Curve')
-plt.title('Backtest Equity Curve (5m)')
-plt.xlabel('Date')
-plt.ylabel('Equity')
-plt.legend()
-plt.grid(True)
-plt.show()
+def sell_macd_cross_down(df, i, entry_price=None):
+    return df['MACD'].iloc[i] < df['MACD_signal'].iloc[i] and df['MACD'].iloc[i-1] >= df['MACD_signal'].iloc[i-1]
 
-# Print trades
-for trade in trades:
-    print(trade)
+# --- Backtest all buy/sell combinations ---
+buy_signals = [buy_sma_cross, buy_rsi_oversold, buy_macd_cross]
+sell_signals = [sell_profit_target, sell_rsi_overbought, sell_macd_cross_down]
+
+results = []
+
+for buy_signal in buy_signals:
+    for sell_signal in sell_signals:
+        position = False
+        entry_price = 0
+        profits = []
+        trades = 0
+        for i in range(1, len(df)):
+            if not position and buy_signal(df, i):
+                position = True
+                entry_price = df['close'].iloc[i]
+            elif position and sell_signal(df, i, entry_price):
+                profit = (df['close'].iloc[i] - entry_price) / entry_price
+                profits.append(profit)
+                trades += 1
+                position = False
+        total_profit = sum(profits)
+        avg_profit = total_profit / trades if trades > 0 else 0
+        results.append({
+            'buy_signal': buy_signal.__name__,
+            'sell_signal': sell_signal.__name__,
+            'total_profit': total_profit,
+            'trades': trades,
+            'avg_profit': avg_profit
+        })
+
+# Sort and display results
+results = sorted(results, key=lambda x: x['total_profit'], reverse=True)
+
+print("Backtest Results (sorted by total profit):\n")
+for r in results:
+    print(f"Buy Signal: {r['buy_signal']:20} | Sell Signal: {r['sell_signal']:20} | "
+          f"Total Profit: {r['total_profit']*100:.2f}% | Trades: {r['trades']} | Avg Profit: {r['avg_profit']*100:.2f}%")
