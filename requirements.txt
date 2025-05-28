@@ -2,3 +2,10 @@ pybit
 requests
 python-telegram-bot
 python-binance
+pandas
+numpy
+scikit-learn
+ta
+ccxt
+pymongo
+python-dotenv
