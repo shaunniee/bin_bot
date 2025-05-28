@@ -216,4 +216,10 @@ def main():
         wins = sum(1 for t in trades if t["pnl"] > 0)
         avg_pnl = sum(t["pnl"] for t in trades) / len(trades)
         print(f"Total trades: {len(trades)}")
-        print(f"Win rate: {wins}/{len(trades)} ({wins / len(trades) * 100:.2
+        print(f"Win rate: {wins}/{len(trades)} ({wins / len(trades) * 100:.2f}%)")
+        print(f"Average PnL: {avg_pnl:.2f}")
+    else:
+        print("No trades executed.")
+
+if __name__ == "__main__":
+    main()
