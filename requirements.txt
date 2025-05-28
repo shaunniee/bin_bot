@@ -9,3 +9,4 @@ ta
 ccxt
 pymongo
 python-dotenv
+matplotlib
