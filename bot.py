@@ -5,6 +5,7 @@ import ta
 import numpy as np
 from itertools import product
 
+
 # Load API keys from env
 API_KEY = os.getenv('BINANCE_API_KEY', '')
 API_SECRET = os.getenv('BINANCE_API_SECRET', '')
