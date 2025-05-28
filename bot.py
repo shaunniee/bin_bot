@@ -1,148 +1,171 @@
 import os
-from binance.client import Client
-import pandas as pd
-import ta
 import numpy as np
-from itertools import product
+import pandas as pd
+from binance.client import Client
+import time
 
+# Get API keys from environment variables
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
 
-# Load API keys from env
-API_KEY = os.getenv('BINANCE_API_KEY', '')
-API_SECRET = os.getenv('BINANCE_API_SECRET', '')
-client = Client(API_KEY, API_SECRET, testnet=True)
+# Connect to Binance Testnet
+client = Client(API_KEY, API_SECRET)
+client.API_URL = 'https://testnet.binance.vision/api'  # Binance Testnet base URL
 
-def get_klines(symbol='BTCUSDT', interval='15m', limit=1000):
-    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(klines, columns=[
+def get_historical_data(symbol, interval, lookback):
+    """
+    Fetch historical klines from Binance Testnet.
+    """
+    klines = client.get_historical_klines(symbol, interval, lookback)
+    data = pd.DataFrame(klines, columns=[
         'open_time', 'open', 'high', 'low', 'close', 'volume',
         'close_time', 'quote_asset_volume', 'number_of_trades',
         'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
     ])
-    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-    df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
-    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
-    return df[['open_time', 'open', 'high', 'low', 'close', 'volume']]
+    data['close'] = data['close'].astype(float)
+    data['open'] = data['open'].astype(float)
+    data['high'] = data['high'].astype(float)
+    data['low'] = data['low'].astype(float)
+    data['volume'] = data['volume'].astype(float)
+    return data
 
-df = get_klines()
+def compute_rsi(prices, period=14):
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-# Indicators
-df['SMA_10'] = df['close'].rolling(10).mean()
-df['SMA_30'] = df['close'].rolling(30).mean()
-df['RSI'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-macd = ta.trend.MACD(df['close'])
-df['MACD'] = macd.macd()
-df['MACD_signal'] = macd.macd_signal()
-df['BB_upper'] = ta.volatility.BollingerBands(df['close']).bollinger_hband()
-df['BB_lower'] = ta.volatility.BollingerBands(df['close']).bollinger_lband()
-df['ADX'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close']).adx()
+def compute_macd(prices, fast=12, slow=26, signal=9):
+    fast_ema = prices.ewm(span=fast, adjust=False).mean()
+    slow_ema = prices.ewm(span=slow, adjust=False).mean()
+    macd = fast_ema - slow_ema
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd - signal_line
 
-# Buy signals: return 1 if signal is triggered else 0
-def buy_sma_cross(i):  # SMA10 crosses above SMA30
-    return int(df['SMA_10'].iloc[i] > df['SMA_30'].iloc[i] and df['SMA_10'].iloc[i-1] <= df['SMA_30'].iloc[i-1])
+# Indicator functions return 1 (buy/sell signal) or 0 (no signal) for the latest candle slice
+def buy_rsi(data):
+    rsi = compute_rsi(data['close'])
+    return 1 if rsi.iloc[-1] < 30 else 0
 
-def buy_rsi_oversold(i):
-    return int(df['RSI'].iloc[i] < 30)
+def buy_macd(data):
+    macd_val = compute_macd(data['close'])
+    return 1 if macd_val.iloc[-1] > 0 else 0
 
-def buy_macd_cross(i):
-    return int(df['MACD'].iloc[i] > df['MACD_signal'].iloc[i] and df['MACD'].iloc[i-1] <= df['MACD_signal'].iloc[i-1])
+def sell_rsi(data):
+    rsi = compute_rsi(data['close'])
+    return 1 if rsi.iloc[-1] > 70 else 0
 
-def buy_bb_lower_band(i):
-    return int(df['close'].iloc[i] < df['BB_lower'].iloc[i])
+def sell_macd(data):
+    macd_val = compute_macd(data['close'])
+    return 1 if macd_val.iloc[-1] < 0 else 0
 
-def buy_adx_strong_trend(i):
-    return int(df['ADX'].iloc[i] > 25)
+buy_funcs = [buy_rsi, buy_macd]
+sell_funcs = [sell_rsi, sell_macd]
 
-buy_funcs = [buy_sma_cross, buy_rsi_oversold, buy_macd_cross, buy_bb_lower_band, buy_adx_strong_trend]
-
-# Sell signals
-def sell_profit_target(i, entry_price, target=0.02):
-    return (df['close'].iloc[i] - entry_price) / entry_price >= target
-
-def sell_rsi_overbought(i, entry_price=None):
-    return int(df['RSI'].iloc[i] > 70)
-
-def sell_macd_cross_down(i, entry_price=None):
-    return int(df['MACD'].iloc[i] < df['MACD_signal'].iloc[i] and df['MACD'].iloc[i-1] >= df['MACD_signal'].iloc[i-1])
-
-def sell_bb_upper_band(i, entry_price=None):
-    return int(df['close'].iloc[i] > df['BB_upper'].iloc[i])
-
-def sell_adx_weakening_trend(i, entry_price=None):
-    return int(df['ADX'].iloc[i] < 20)
-
-sell_funcs = [sell_profit_target, sell_rsi_overbought, sell_macd_cross_down, sell_bb_upper_band, sell_adx_weakening_trend]
-
-# Combine buy signals weighted sum
-def combined_buy_signal(i, weights):
-    score = 0
-    for w, f in zip(weights, buy_funcs):
-        score += w * f(i)
-    return score
-
-# Combine sell signals weighted sum
-def combined_sell_signal(i, weights, entry_price):
-    score = 0
-    for w, f in zip(weights, sell_funcs):
-        # profit_target needs entry_price param, others ignore it safely
-        if f == sell_profit_target:
-            score += w * f(i, entry_price)
-        else:
-            score += w * f(i)
-    return score
-
-# Backtest weighted strategy for given weights
-def backtest_strategy(buy_weights, sell_weights, buy_threshold=0.5, sell_threshold=0.5):
-    position = False
+def backtest_strategy(buy_weights, sell_weights):
+    data = get_historical_data("BTCUSDT", "1h", "30 day ago UTC")
+    balance = 1.0  # start with 1 unit of capital
+    position = 0  # 0 = no position, 1 = holding BTC
     entry_price = 0
-    profits = []
     trades = 0
-    for i in range(1, len(df)):
-        if not position:
-            if combined_buy_signal(i, buy_weights) >= buy_threshold:
-                position = True
-                entry_price = df['close'].iloc[i]
-        else:
-            if combined_sell_signal(i, sell_weights, entry_price) >= sell_threshold:
-                profit = (df['close'].iloc[i] - entry_price) / entry_price
-                profits.append(profit)
-                trades += 1
-                position = False
-    total_profit = sum(profits)
-    avg_profit = total_profit / trades if trades > 0 else 0
+    profit_pct_list = []
+
+    for i in range(15, len(data)):  # start after enough data for indicators
+        window = data.iloc[:i+1]
+
+        buy_score = sum(w * f(window) for w, f in zip(buy_weights, buy_funcs))
+        sell_score = sum(w * f(window) for w, f in zip(sell_weights, sell_funcs))
+
+        # Normalize scores to 0-1 range (if weights sum to >0)
+        buy_score /= sum(buy_weights) if sum(buy_weights) != 0 else 1
+        sell_score /= sum(sell_weights) if sum(sell_weights) != 0 else 1
+
+        price = data.iloc[i]['close']
+
+        # Buy signal
+        if buy_score > 0.5 and position == 0:
+            position = 1
+            entry_price = price
+
+        # Sell signal
+        elif sell_score > 0.5 and position == 1:
+            position = 0
+            exit_price = price
+            trades += 1
+            profit_pct = (exit_price - entry_price) / entry_price
+            balance *= (1 + profit_pct)
+            profit_pct_list.append(profit_pct)
+
+    total_profit = balance - 1
+    avg_profit = np.mean(profit_pct_list) if profit_pct_list else 0
     return total_profit, trades, avg_profit
 
-# --- Grid search to find best weights ---
-import itertools
+# --- Genetic Algorithm ---
 
-# Weight candidates: try 0, 0.25, 0.5, 0.75, 1 for each indicator
-weight_options = [0, 0.25, 0.5, 0.75, 1]
+POP_SIZE = 50
+GENERATIONS = 30
+N_BUY = len(buy_funcs)
+N_SELL = len(sell_funcs)
 
-best_profit = -np.inf
-best_buy_w = None
-best_sell_w = None
+LOWER, UPPER = 0, 1
 
-# For brevity, limit grid search size by sampling combinations
-# Full brute-force would be huge: 5^5 for buy * 5^5 for sell = 9,765,625 combos
-# Let's try random samples instead for demonstration
+def init_population():
+    return np.random.uniform(LOWER, UPPER, size=(POP_SIZE, N_BUY + N_SELL))
 
-np.random.seed(42)
-samples = 1000
+def fitness(individual):
+    buy_weights = individual[:N_BUY]
+    sell_weights = individual[N_BUY:]
+    profit, trades, avg_profit = backtest_strategy(buy_weights, sell_weights)
+    # Penalize if too few trades (encourage strategy that trades enough)
+    if trades < 3:
+        return -np.inf
+    return profit
 
-for _ in range(samples):
-    buy_weights = np.random.choice(weight_options, size=len(buy_funcs))
-    sell_weights = np.random.choice(weight_options, size=len(sell_funcs))
-    profit, trades, avg = backtest_strategy(buy_weights, sell_weights)
-    if profit > best_profit and trades > 5:  # Require minimum trades
-        best_profit = profit
-        best_buy_w = buy_weights
-        best_sell_w = sell_weights
+def select(pop, fitnesses):
+    selected = []
+    for _ in range(POP_SIZE):
+        i, j = np.random.choice(range(POP_SIZE), 2, replace=False)
+        winner = i if fitnesses[i] > fitnesses[j] else j
+        selected.append(pop[winner])
+    return np.array(selected)
 
-print("Best profit:", best_profit)
-print("Best buy weights:", best_buy_w)
-print("Best sell weights:", best_sell_w)
+def crossover(parent1, parent2):
+    point = np.random.randint(1, len(parent1)-1)
+    child1 = np.concatenate([parent1[:point], parent2[point:]])
+    child2 = np.concatenate([parent2[:point], parent1[point:]])
+    return child1, child2
 
-# Backtest again using best weights with thresholds at 0.5
-total_profit, trades, avg_profit = backtest_strategy(best_buy_w, best_sell_w)
+def mutate(individual, mutation_rate=0.1):
+    for i in range(len(individual)):
+        if np.random.rand() < mutation_rate:
+            individual[i] = np.clip(individual[i] + np.random.normal(0, 0.1), LOWER, UPPER)
+    return individual
 
-print(f"\nBacktest with best weights:")
-print(f"Total Profit: {total_profit*100:.2f}% over {trades} trades, Avg Profit per trade: {avg_profit*100:.2f}%")
+def genetic_algorithm():
+    population = init_population()
+    for gen in range(GENERATIONS):
+        fitnesses = np.array([fitness(ind) for ind in population])
+        best_idx = np.argmax(fitnesses)
+        print(f"Generation {gen+1} - Best profit: {fitnesses[best_idx]:.4f}")
+        selected = select(population, fitnesses)
+        next_population = []
+        for i in range(0, POP_SIZE, 2):
+            p1, p2 = selected[i], selected[i+1]
+            c1, c2 = crossover(p1, p2)
+            next_population.append(mutate(c1))
+            next_population.append(mutate(c2))
+        population = np.array(next_population)
+
+    fitnesses = np.array([fitness(ind) for ind in population])
+    best_idx = np.argmax(fitnesses)
+    best_weights = population[best_idx]
+    print("\nBest Buy Weights:", best_weights[:N_BUY])
+    print("Best Sell Weights:", best_weights[N_BUY:])
+
+    profit, trades, avg_profit = backtest_strategy(best_weights[:N_BUY], best_weights[N_BUY:])
+    print(f"Final Results: Profit={profit*100:.2f}%, Trades={trades}, Avg Profit per trade={avg_profit*100:.2f}%")
+
+if __name__ == "__main__":
+    genetic_algorithm()
