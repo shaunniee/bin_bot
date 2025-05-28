@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+from itertools import product
 from binance.client import Client
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator, StochasticOscillator
@@ -70,24 +71,36 @@ def sell_signal(row, weights):
 def backtest_strategy(df, weights):
     usdt = 1000
     position = 0
+    entry_price = 0
     for i in range(1, len(df)):
         row = df.iloc[i]
         if position == 0 and buy_signal(row, weights):
             position = usdt / row['close']
-            buy_price = row['close']
-            print(f"Buy @ {buy_price:.2f}")
+            entry_price = row['close']
         elif position > 0 and sell_signal(row, weights):
             usdt = position * row['close']
-            print(f"Sell @ {row['close']:.2f}, Profit: {usdt - 1000:.2f}")
             position = 0
-
     if position > 0:
         usdt = position * df.iloc[-1]['close']
-        print(f"Final Sell @ {df.iloc[-1]['close']:.2f}, Final Profit: {usdt - 1000:.2f}")
+    return usdt - 1000
+
+# --- Find best weights ---
+def optimize_weights(df):
+    best_profit = float('-inf')
+    best_weights = None
+    for weights in product([0, 1, 2], repeat=6):
+        profit = backtest_strategy(df, weights)
+        if profit > best_profit:
+            best_profit = profit
+            best_weights = weights
+            print(f"New Best -> Profit: {profit:.2f}, Weights: {weights}")
+    print(f"\nBest Weights: {best_weights}, Max Profit: {best_profit:.2f}")
+    return best_weights
 
 # --- Main logic ---
 if __name__ == "__main__":
     df = get_klines('BTCUSDT', '1h', 1000)
     df = add_indicators(df)
-    weights = [1, 1, 1, 1, 1, 1]  # You can optimize these
-    backtest_strategy(df, weights)
+    best_weights = optimize_weights(df)
+    print("\nBacktesting using best weights:")
+    backtest_strategy(df, best_weights)
