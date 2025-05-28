@@ -10,3 +10,4 @@ ccxt
 pymongo
 python-dotenv
 matplotlib
+itertools
