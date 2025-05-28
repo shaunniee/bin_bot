@@ -18,7 +18,7 @@ backtest_collection = db["backtest_trades"]
 
 # === Set up exchange (for historical data only) ===
 exchange = ccxt.binance()
-symbol = "BTC/USDT"
+symbol = "XRP/USDT"
 timeframe = "5m"
 
 # === Indicators ===
