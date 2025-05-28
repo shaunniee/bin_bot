@@ -8,7 +8,7 @@ from ta.volatility import AverageTrueRange
 # ------------------------
 # Fetch Historical Data
 # ------------------------
-def fetch_ohlcv(symbol="BTC/USDT", timeframe="5m", limit=1000):
+def fetch_ohlcv(symbol="XRP/USDT", timeframe="5m", limit=1000):
     exchange = ccxt.binance()
     data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
