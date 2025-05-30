@@ -1,132 +1,279 @@
-import os
-import pandas as pd
-import numpy as np
 import requests
-from itertools import product
-import ta  # You need to install ta-lib or use `pip install ta`
+import pandas as pd
+import time
+import numpy as np
+from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
+import os
 
-# --- Binance Testnet historical data fetch ---
-def get_binance_testnet_klines(symbol, interval, limit=1000):
-    base_url = 'https://testnet.binance.vision/api/v3/klines'
+# --- CONFIGURATION ---
+symbol = "BTCUSDT"
+interval = "15m"
+days = 730  # 2 years (730 days)
+limit_per_request = 1000
+initial_balance = 10000
+data_file = f"{symbol}_{interval}_{days}d.csv"
+
+config = {
+    "stop_loss_pct": 0.02,  # 2% initial stop loss
+    "take_profit_pct": 0.03,  # 3% take profit
+}
+
+strategies = ["EMA_RSI_VWAP", "BREAKOUT_RETEST", "SCALPING_VWAP"]
+
+# --- FETCH BINANCE KLINES ---
+def get_klines(symbol, interval, start_time, end_time, limit=1000):
+    url = "https://api.binance.com/api/v3/klines"
     params = {
-        'symbol': symbol,
-        'interval': interval,
-        'limit': limit
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit,
+        "startTime": start_time,
+        "endTime": end_time
     }
-    response = requests.get(base_url, params=params)
+    response = requests.get(url, params=params)
     data = response.json()
-    df = pd.DataFrame(data, columns=[
-        'open_time', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_asset_volume', 'number_of_trades',
-        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-    ])
-    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-    df.set_index('open_time', inplace=True)
-    df = df.astype({
-        'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 'volume': 'float'
-    })
-    return df[['open', 'high', 'low', 'close', 'volume']]
+    return data
 
-# --- Add indicators ---
-def add_indicators(df):
-    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-    macd = ta.trend.MACD(df['close'])
-    df['macd'] = macd.macd()
-    df['macd_signal'] = macd.macd_signal()
-    df['ema9'] = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator()
-    df['ema21'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
-    df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close'])/3).cumsum() / df['volume'].cumsum()
-    bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2)
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_lower'] = bb.bollinger_lband()
-    stoch = ta.momentum.StochasticOscillator(df['high'], df['low'], df['close'], window=14, smooth_window=3)
-    df['stoch_k'] = stoch.stoch()
-    df['stoch_d'] = stoch.stoch_signal()
-    df.dropna(inplace=True)
+def fetch_data(symbol, interval, days):
+    if os.path.exists(data_file):
+        print(f"Loading cached data from {data_file}")
+        df = pd.read_csv(data_file, index_col=0, parse_dates=True)
+        return df
+
+    print(f"Fetching {days} days of data for {symbol} @ {interval}...")
+
+    end_time = int(time.time() * 1000)
+    start_time = end_time - days * 24 * 60 * 60 * 1000
+    all_klines = []
+
+    total_klines_needed = days * 24 * 4  # 4 x 15min intervals per hour
+    fetched_klines = 0
+
+    while start_time < end_time:
+        klines = get_klines(symbol, interval, start_time, end_time, limit_per_request)
+        if not klines:
+            break
+        all_klines += klines
+        fetched_klines += len(klines)
+        start_time = klines[-1][0] + 1
+
+        progress = (fetched_klines / total_klines_needed) * 100
+        print(f"Progress: {progress:.2f}% ({fetched_klines} klines fetched)", end='\r')
+
+        time.sleep(0.25)  # rate limit
+
+        if len(klines) < limit_per_request:
+            break  # no more data
+
+    print("\nFinished fetching data.")
+
+    df = pd.DataFrame(all_klines, columns=[
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "number_of_trades",
+        "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
+    ])
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+    df.set_index("open_time", inplace=True)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
+
+    # Save for later use
+    df.to_csv(data_file)
+    print(f"Saved data to {data_file}")
+
     return df
 
-# --- Buy and sell signals with separate weights ---
-def buy_signal(row, weights):
-    score = 0
-    score += weights[0] * (row['rsi'] < 30)
-    score += weights[1] * (row['macd'] > row['macd_signal'])
-    score += weights[2] * (row['ema9'] > row['ema21'])
-    score += weights[3] * (row['close'] > row['vwap'])
-    score += weights[4] * (row['close'] < row['bb_lower'])
-    score += weights[5] * (row['stoch_k'] < 20 and row['stoch_k'] > row['stoch_d'])
-    return score >= 3
+# --- MANUAL VWAP ---
+def add_vwap(df, window=14):
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    pv = typical_price * df['volume']
+    vwap = pv.rolling(window=window).sum() / df['volume'].rolling(window=window).sum()
+    df['vwap'] = vwap
+    return df
 
-def sell_signal(row, weights):
-    score = 0
-    score += weights[0] * (row['rsi'] > 70)
-    score += weights[1] * (row['macd'] < row['macd_signal'])
-    score += weights[2] * (row['ema9'] < row['ema21'])
-    score += weights[3] * (row['close'] < row['vwap'])
-    score += weights[4] * (row['close'] > row['bb_upper'])
-    score += weights[5] * (row['stoch_k'] > 80 and row['stoch_k'] < row['stoch_d'])
-    return score >= 3
+# --- INDICATORS ---
+def add_indicators(df):
+    df["ema9"] = EMAIndicator(df["close"], window=9).ema_indicator()
+    df["ema21"] = EMAIndicator(df["close"], window=21).ema_indicator()
+    df["rsi"] = RSIIndicator(df["close"], window=14).rsi()
+    df = add_vwap(df)
+    return df
 
-# --- Backtest the strategy with given weights ---
-def backtest_strategy(df, buy_weights, sell_weights):
-    usdt = 1000
+# --- STRATEGIES ---
+def strategy_ema_rsi_vwap(row, prev_row):
+    if prev_row is None:
+        return False
+    price_cross_vwap = (prev_row["close"] < prev_row["vwap"]) and (row["close"] > row["vwap"])
+    ema_cross = (prev_row["ema9"] < prev_row["ema21"]) and (row["ema9"] > row["ema21"])
+    rsi_cross = (prev_row["rsi"] < 30) and (row["rsi"] > 30)
+    return price_cross_vwap and ema_cross and rsi_cross
+
+def strategy_breakout_retest(df, idx):
+    if idx < 13:
+        return False
+    window = df.iloc[idx-13:idx-1]
+    resistance = window["high"].max()
+    current = df.iloc[idx]
+    prev = df.iloc[idx-1]
+    breakout = (prev["close"] <= resistance) and (current["close"] > resistance)
+    retest = (idx + 1 < len(df)) and (df.iloc[idx+1]["low"] >= resistance)
+    return breakout and retest
+
+def strategy_scalping_vwap(row, prev_row):
+    if prev_row is None:
+        return False
+    bounce = (row["low"] <= row["vwap"] * 1.002) and (row["close"] > row["vwap"])
+    rsi_good = 40 <= row["rsi"] <= 60
+    return bounce and rsi_good
+
+# --- BACKTEST ---
+def backtest_strategy(df, strategy_name, config):
+    balance = initial_balance
     position = 0
-    entry_price = 0
-    trades = 0
+    buy_price = 0
+    trade_log = []
 
-    for i in range(1, len(df)):
+    sl_hits = 0
+    tp_hits = 0
+    profit_sl_hits = 0
+    loss_sl_hits = 0
+    trailing_stop = None
+
+    for i in range(1, len(df)-1):
         row = df.iloc[i]
-        if position == 0 and buy_signal(row, buy_weights):
-            position = usdt / row['close']
-            entry_price = row['close']
-            trades += 1
-        elif position > 0 and sell_signal(row, sell_weights):
-            usdt = position * row['close']
-            position = 0
-            trades += 1
+        prev_row = df.iloc[i-1]
 
-    # Close position if still open at the end
+        signal = False
+        if strategy_name == "EMA_RSI_VWAP":
+            signal = strategy_ema_rsi_vwap(row, prev_row)
+        elif strategy_name == "BREAKOUT_RETEST":
+            signal = strategy_breakout_retest(df, i)
+        elif strategy_name == "SCALPING_VWAP":
+            signal = strategy_scalping_vwap(row, prev_row)
+
+        if position == 0 and signal:
+            buy_price = row["close"]
+            position = balance / buy_price
+            balance = 0
+            trade_log.append({"date": df.index[i], "type": "BUY", "price": buy_price})
+
+            # Initialize trailing stop loss at initial stop loss level below buy price
+            trailing_stop = buy_price * (1 - config["stop_loss_pct"])  # e.g. 2% below buy
+
+        elif position > 0:
+            current_price = row["close"]
+
+            # Move trailing stop up based on price movement
+            if current_price >= buy_price * 1.02:  # price +2%
+                new_trailing = buy_price * 1.02
+                if new_trailing > trailing_stop:
+                    trailing_stop = new_trailing
+            elif current_price >= buy_price * 1.01:  # price +1%
+                new_trailing = buy_price * 1.01
+                if new_trailing > trailing_stop:
+                    trailing_stop = new_trailing
+
+            # Sell conditions
+            if current_price >= buy_price * (1 + config["take_profit_pct"]):
+                balance = position * current_price
+                trade_log.append({"date": df.index[i], "type": "SELL_TP", "price": current_price})
+                position = 0
+                tp_hits += 1
+                trailing_stop = None
+            elif current_price <= trailing_stop:
+                balance = position * current_price
+                trade_log.append({"date": df.index[i], "type": "SELL_SL", "price": current_price})
+                position = 0
+                sl_hits += 1
+                # Log profit or loss stop loss
+                if current_price > buy_price:
+                    profit_sl_hits += 1
+                else:
+                    loss_sl_hits += 1
+                trailing_stop = None
+
+    # Close position at end if still open
     if position > 0:
-        usdt = position * df.iloc[-1]['close']
+        last_price = df["close"].iloc[-1]
+        balance = position * last_price
+        trade_log.append({"date": df.index[-1], "type": "SELL_EOD", "price": last_price})
+        position = 0
+        trailing_stop = None
 
-    profit = usdt - 1000
-    return profit
+    return balance, trade_log, sl_hits, tp_hits, profit_sl_hits, loss_sl_hits
 
-# --- Optimize weights by brute force ---
-def optimize_weights(df):
-    best_profit = float('-inf')
-    best_buy_weights = None
-    best_sell_weights = None
-    weight_range = [0, 1, 2]
+def summarize_monthly_profit(trade_log):
+    # Calculate monthly profit from trades
+    monthly_profit = {}
 
-    total_combinations = len(weight_range)**6 * len(weight_range)**6
-    print(f"Total combinations to test: {total_combinations}")
+    # Trades should be in pairs: BUY followed by SELL
+    for i in range(0, len(trade_log)-1, 2):
+        buy = trade_log[i]
+        sell = trade_log[i+1]
 
-    count = 0
-    for buy_weights in product(weight_range, repeat=6):
-        for sell_weights in product(weight_range, repeat=6):
-            profit = backtest_strategy(df, buy_weights, sell_weights)
-            count += 1
-            if profit > best_profit:
-                best_profit = profit
-                best_buy_weights = buy_weights
-                best_sell_weights = sell_weights
-                print(f"New Best -> Profit: {profit:.2f}, Buy weights: {buy_weights}, Sell weights: {sell_weights}")
-            if count % 1000 == 0:
-                print(f"Tested {count}/{total_combinations} combinations...")
+        # Profit for trade
+        profit = sell["price"] - buy["price"]
 
-    print(f"\nBest Buy weights: {best_buy_weights}, Best Sell weights: {best_sell_weights}, Max Profit: {best_profit:.2f}")
-    return best_buy_weights, best_sell_weights
+        month_str = buy["date"].strftime("%Y-%m")
+        monthly_profit[month_str] = monthly_profit.get(month_str, 0) + profit
 
+    # Convert to sorted dict
+    monthly_profit = dict(sorted(monthly_profit.items()))
+
+    return monthly_profit
+
+def print_trade_details(trades):
+    print("\nTrade details:")
+    print(f"{'Date':<20} {'Type':<10} {'Price':<10} {'Profit/Loss':<12}")
+    for i in range(0, len(trades), 2):
+        buy = trades[i]
+        sell = trades[i+1] if i+1 < len(trades) else None
+        profit = None
+        if sell:
+            profit = sell["price"] - buy["price"]
+        print(f"{buy['date']} {'BUY':<10} {buy['price']:<10.2f} {'':<12}")
+        if sell:
+            print(f"{sell['date']} {sell['type']:<10} {sell['price']:<10.2f} {profit:<12.2f}")
+        else:
+            print(f"{'N/A':<20} {'N/A':<10} {'N/A':<10} {'N/A':<12}")
+
+# --- MAIN ---
 def main():
-    print("Fetching historical data...")
-    df = get_binance_testnet_klines('XRPUSDT', '15m', limit=1000)
-    print("Calculating indicators...")
+    df = fetch_data(symbol, interval, days)
+    print(f"Data loaded: {len(df)} rows")
+
     df = add_indicators(df)
-    print("Optimizing weights, this may take some time...")
-    best_buy_weights, best_sell_weights = optimize_weights(df)
-    print("Backtesting using best weights...")
-    final_profit = backtest_strategy(df, best_buy_weights, best_sell_weights)
-    print(f"Final profit with best weights: {final_profit:.2f}")
+    print("Indicators added.")
+
+    results = []
+
+    for strat in strategies:
+        print(f"\nBacktesting strategy: {strat}")
+        final_balance, trades, sl_hits, tp_hits, profit_sl_hits, loss_sl_hits = backtest_strategy(df, strat, config)
+        net_return_pct = ((final_balance - initial_balance) / initial_balance) * 100
+        num_trades = len([t for t in trades if t["type"] == "BUY"])
+        print(f"Initial Balance: ${initial_balance}")
+        print(f"Final Balance:   ${final_balance:.2f}")
+        print(f"Net Return:      {net_return_pct:.2f}%")
+        print(f"Total trades:    {num_trades}")
+        print(f"Take-Profit hits: {tp_hits}")
+        print(f"Stop-Loss hits:   {sl_hits}")
+        print(f"Profit Stop-Loss hits: {profit_sl_hits}")
+        print(f"Loss Stop-Loss hits:   {loss_sl_hits}")
+
+        monthly_profit = summarize_monthly_profit(trades)
+        print("\nMonthly Profit Summary:")
+        for month, profit in monthly_profit.items():
+            print(f"{month}: {profit:.2f}")
+
+        print_trade_details(trades)
+        results.append((strat, net_return_pct))
+
+    # Print summary
+    print("\nSummary of strategies:")
+    for strat, ret in results:
+        print(f"{strat}: {ret:.2f}% return")
 
 if __name__ == "__main__":
     main()
