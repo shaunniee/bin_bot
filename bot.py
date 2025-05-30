@@ -15,7 +15,7 @@ initial_balance = 10000
 data_file = f"{symbol}_{interval}_{days}d.csv"
 
 config = {
-    "stop_loss_pct": 0.20,  # 2% initial stop loss
+    "stop_loss_pct": 0.06,  # 2% initial stop loss
     "take_profit_pct": 0.03,  # 3% take profit
 }
 
